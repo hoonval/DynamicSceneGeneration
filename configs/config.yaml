@@ -3,4 +3,6 @@ defaults:
 
 dataset:
   name: "procthor-10k"
-  num_houses: 10
+  scene_id: 10
+
+debug: True

@@ -1,0 +1,6 @@
+defaults:
+  - task: search_object
+
+dataset:
+  name: "procthor-10k"
+  num_houses: 10

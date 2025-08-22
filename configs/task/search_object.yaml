@@ -1,0 +1,9 @@
+# Search object task configuration
+task:
+  type: "search_object"
+  max_steps: 100
+  success_threshold: 0.8
+
+scene:
+  random_seed: 42
+  max_objects: 20

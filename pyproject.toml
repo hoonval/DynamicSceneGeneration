@@ -1,0 +1,12 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "canav"
+version = "0.0.1"
+description = "CANav project"
+requires-python = ">=3.9"
+
+[tool.setuptools.package-dir]
+"" = "."

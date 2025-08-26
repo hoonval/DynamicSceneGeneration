@@ -74,143 +74,196 @@ def main(cfg: DictConfig):
     objects = event.metadata.get("objects", [])
     movable_objects = [obj for obj in objects if obj.get("pickupable", False)]
 
-    # movable 객체들을 furniture 위에 배치
-    if movable_objects:
-        # 씬에서 receptacle 역할을 할 수 있는 furniture 찾기 (더 엄격한 검증)
-        valid_receptacle_types = ["Table", "CounterTop", "Shelf", "Desk", "Chair", "Bed", "Cabinet", "Drawer"]
-        receptacles = [
-            obj for obj in objects 
-            if (obj.get("receptacle", False) and 
-                obj.get("objectType") in valid_receptacle_types)
-        ]
-    
+    # pickup 가능한 object들을 receptacle object에 배치하는 함수
+    def place_objects_on_receptacles(controller, movable_objects, receptacles):
+        """
+        pickup 가능한 object들을 receptacle object에 배치
+        
+        Args:
+            controller: AI2-THOR controller
+            movable_objects: pickup 가능한 object 리스트
+            receptacles: receptacle object 리스트
+        """
+        if not movable_objects:
+            if cfg.debug:
+                print("⚠ pickup 가능한 object가 없습니다.")
+            return
+        
+        if not receptacles:
+            if cfg.debug:
+                print("⚠ receptacle object가 없습니다.")
+            return
+        
         if cfg.debug:
-            print(f"\n사용 가능한 receptacle 객체들:")
-            for i, rec in enumerate(receptacles):
-                print(f"{i+1}. {rec.get('name', 'N/A')} - {rec.get('objectType', 'N/A')}")
+            print(f"\n=== Object 배치 시작 ===")
+            print(f"Pickup 가능한 objects: {len(movable_objects)}개")
+            print(f"Receptacle objects: {len(receptacles)}개")
         
-        
+        # 각 pickup object를 receptacle에 배치
         for i, movable_obj in enumerate(movable_objects):
-            if i < len(receptacles):  # receptacle이 있는 경우에만
-                receptacle = receptacles[i % len(receptacles)]  # receptacle 순환 사용
-                
+            # receptacle 순환 사용 (receptacle이 부족한 경우)
+            receptacle = receptacles[i % len(receptacles)]
+            
+            if cfg.debug:
+                print(f"\n--- {i+1}/{len(movable_objects)}: {movable_obj.get('name', 'N/A')} 처리 중 ---")
+                print(f"대상 receptacle: {receptacle.get('name', 'N/A')} ({receptacle.get('objectType', 'N/A')})")
+            
+            # 1단계: movable object와 상호작용 가능한 포즈 찾기
+            if cfg.debug:
+                print(f"1단계: {movable_obj.get('name', 'N/A')}와 상호작용 가능한 포즈 찾는 중...")
+            
+            interactable_poses = controller.step(
+                action="GetInteractablePoses",
+                objectId=movable_obj["objectId"],
+                positions=None,
+                rotations=list(range(0, 360, 10)),
+                horizons=list(np.linspace(-30, 60, 30).astype(float)),
+                standings=[True, False] 
+            ).metadata["actionReturn"]
+            
+            if not interactable_poses:
                 if cfg.debug:
-                    print(f"{movable_obj.get('name', 'N/A')}와 상호작용 가능한 포즈 찾는 중...")
+                    print(f"⚠ {movable_obj.get('name', 'N/A')}와 상호작용 가능한 포즈를 찾을 수 없습니다.")
+                continue
+            
+            # 2단계: 상호작용 가능한 포즈로 이동
+            import random
+            pose = random.choice(interactable_poses)
+            
+            if cfg.debug:
+                print(f"2단계: 선택된 포즈로 이동 - x={pose['x']:.2f}, y={pose['y']:.2f}, z={pose['z']:.2f}")
+            
+            controller.step("TeleportFull", **pose)
+            
+            # 3단계: 손에 있는 객체 확인 및 처리
+            agent_metadata = controller.last_event.metadata.get("agent", {})
+            if agent_metadata.get("heldObject"):
+                if cfg.debug:
+                    print(f"3단계: 손에 이미 {agent_metadata['heldObject']}가 있습니다. 드롭합니다.")
+                controller.step(action="DropHandObject")
+            
+            # 4단계: Pickup 시도
+            if cfg.debug:
+                print(f"4단계: {movable_obj.get('name', 'N/A')} Pickup 시도...")
+            
+            pickup_event = controller.step(
+                action="PickupObject",
+                objectId=movable_obj["objectId"],
+                forceAction=True,
+                manualInteract=False
+            )
+            
+            if not pickup_event.metadata["lastActionSuccess"]:
+                error_msg = pickup_event.metadata.get('errorMessage', '')
+                if cfg.debug:
+                    print(f"✗ Pickup 실패: {error_msg}")
+                continue
+            
+            if cfg.debug:
+                print(f"✓ Pickup 성공: {movable_obj.get('name', 'N/A')}")
+            
+            # 5단계: receptacle과 상호작용 가능한 포즈 찾기
+            if cfg.debug:
+                print(f"5단계: {receptacle.get('name', 'N/A')}와 상호작용 가능한 포즈 찾는 중...")
+            
+            receptacle_interactable_poses = controller.step(
+                action="GetInteractablePoses",
+                objectId=receptacle["objectId"],
+                positions=None,
+                rotations=list(range(0, 360, 45)),
+                horizons=list(np.linspace(-30, 60, 10).astype(float)),
+                standings=[True, False]
+            ).metadata["actionReturn"]
+            
+            if not receptacle_interactable_poses:
+                if cfg.debug:
+                    print(f"⚠ {receptacle.get('name', 'N/A')}와 상호작용 가능한 포즈를 찾을 수 없습니다.")
+                # pickup한 객체를 드롭
+                controller.step(action="DropHandObject")
+                continue
+            
+            # 6단계: receptacle 포즈로 이동
+            receptacle_pose = random.choice(receptacle_interactable_poses)
+            
+            if cfg.debug:
+                print(f"6단계: receptacle 포즈로 이동 - x={receptacle_pose['x']:.2f}, y={receptacle_pose['y']:.2f}, z={receptacle_pose['z']:.2f}")
+            
+            controller.step("TeleportFull", **receptacle_pose)
+            
+            # 7단계: receptacle이 시야에 보이는지 확인
+            receptacle_frame_event = controller.step(
+                action="GetObjectInFrame",
+                x=receptacle_pose["x"],
+                y=receptacle_pose["y"],
+                checkVisible=False,
+            )
+            receptacle_frame_objects = receptacle_frame_event.metadata.get("objects", [])
+            
+            receptacle_visible = False
+            for rec_obj in receptacle_frame_objects:
+                if rec_obj["objectId"] == receptacle["objectId"]:
+                    receptacle_visible = True
+                    break
+            
+            if not receptacle_visible:
+                if cfg.debug:
+                    print(f"⚠ {receptacle.get('name', 'N/A')}가 시야에 보이지 않습니다.")
+                # pickup한 객체를 드롭
+                controller.step(action="DropHandObject")
+                continue
+            
+            if cfg.debug:
+                print(f"✓ {receptacle.get('name', 'N/A')}가 시야에 보입니다.")
+            
+            # 8단계: PutObject 시도 (receptacle 위에 배치)
+            if cfg.debug:
+                print(f"8단계: {movable_obj.get('name', 'N/A')}를 {receptacle.get('name', 'N/A')} 위에 배치 시도...")
+            
+            receptacle_pos = receptacle.get("position", {})
+            put_event = controller.step(
+                action="PutObject",
+                x=receptacle_pos.get("x", 0.5),
+                y=receptacle_pos.get("y", 0.5),
+                putNearXY=True,  # 지정된 좌표 근처에 배치
+                forceAction=True,
+                placeStationary=True
+            )
+            
+            # 9단계: 결과 확인
+            if put_event.metadata["lastActionSuccess"]:
+                if cfg.debug:
+                    print(f"🎉 성공: {movable_obj.get('name', 'N/A')}를 {receptacle.get('name', 'N/A')} 위에 배치 완료!")
+            else:
+                error_msg = put_event.metadata.get('errorMessage', '')
+                if cfg.debug:
+                    print(f"✗ 실패: {movable_obj.get('name', 'N/A')}를 {receptacle.get('name', 'N/A')} 위에 배치 실패")
+                    print(f"    오류: {error_msg}")
+                    print(f"    Event metadata: {put_event.metadata}")
+                    print(f"    Receptacle: {receptacle.get('name')} ({receptacle.get('objectType')})")
+                    print(f"    Movable object: {movable_obj.get('name')} ({movable_obj.get('objectType')})")
+                # pickup한 객체를 드롭
+                controller.step(action="DropHandObject")
+        
+        if cfg.debug:
+            print(f"\n=== Object 배치 완료 ===")
+    
+    # 씬에서 receptacle 역할을 할 수 있는 furniture 찾기 (더 엄격한 검증)
+    # Bed, Chair는 대부분 receptacle이 아니므로 제외
+    valid_receptacle_types = ["Table", "CounterTop", "Shelf", "Desk", "Cabinet", "Drawer", "BookShelf", "NightStand", "CoffeeTable"]
+    receptacles = [
+        obj for obj in objects 
+        if (obj.get("receptacle", False) and 
+            obj.get("objectType") in valid_receptacle_types and
+            not any(bad_name in obj.get("name", "").lower() for bad_name in ["bed", "chair", "sofa", "couch", "armchair"]))
+    ]
 
-                interactable_poses = controller.step(
-                    action="GetInteractablePoses",
-                    objectId=movable_obj["objectId"],
-                    positions=None,
-                    rotations=list(range(0, 360, 10)),
-                    horizons=list(np.linspace(-30, 60, 30).astype(float)),
-                    standings=[True, False] 
-                ).metadata["actionReturn"]
+    # if cfg.debug:
+    #     print(f"\n사용 가능한 receptacle 객체들:")
+    #     for i, rec in enumerate(receptacles):
+    #         print(f"{i+1}. {rec.get('name', 'N/A')} - {rec.get('objectType', 'N/A')}")
 
-                if interactable_poses:  # ✅ 올바른 변수명 사용
-                    # 랜덤하게 하나의 포즈 선택
-                    import random
-                    pose = random.choice(interactable_poses)  # ✅ 올바른 변수명 사용
-                    
-                    # TeleportFull로 선택된 포즈로 이동
-                    controller.step("TeleportFull", **pose)
-                    
-                    # GetObjectsInFrame으로 현재 시야에 movable 객체가 보이는지 확인
-                    if cfg.debug:
-                        print(f"이동 후 {movable_obj.get('name', 'N/A')}가 시야에 보이는지 확인 중...")
-                    
-                    # pickup 전에 손에 있는 객체 확인 및 처리
-                    agent_metadata = controller.last_event.metadata.get("agent", {})
-                    if agent_metadata.get("heldObject"):
-                        if cfg.debug:
-                            print(f"⚠ 손에 이미 {agent_metadata['heldObject']}가 있습니다. 드롭합니다.")
-                        # 현재 손에 있는 객체를 드롭
-                        controller.step(action="DropHandObject")
-                    
-                    # Pickup 시도
-                    if cfg.debug:
-                        print(f"Pickup 시도: {movable_obj.get('name', 'N/A')}")
-                    
-                    pickup_event = controller.step(
-                        action="PickupObject",
-                        objectId=movable_obj["objectId"],
-                        forceAction=True,
-                        manualInteract=False
-                    )
-                    
-                    if pickup_event.metadata["lastActionSuccess"]:
-                        if cfg.debug:
-                            print(f"✓ Pickup 성공: {movable_obj.get('name', 'N/A')}")
-                            print(f"{receptacle.get('name', 'N/A')}와 상호작용 가능한 포즈 찾는 중...")
-                        
-                        receptacle_interactable_poses = controller.step(
-                            action="GetInteractablePoses",
-                            objectId=receptacle["objectId"],
-                            positions=None,
-                            rotations=list(range(0, 360, 45)),
-                            horizons=list(np.linspace(-30, 60, 10).astype(float)),
-                            standings=[True, False]
-                        ).metadata["actionReturn"]
-                        # print("receptacle :",receptacle["objectId"])
-
-                        if receptacle_interactable_poses:
-                            # receptacle과 상호작용 가능한 포즈로 이동
-                            receptacle_pose = random.choice(receptacle_interactable_poses)
-
-                            # TeleportFull로 receptacle 포즈로 이동
-                            controller.step("TeleportFull", **receptacle_pose)
-                            
-                            # receptacle이 프레임에 보이는지 확인
-                            receptacle_frame_event = controller.step(
-                                action="GetObjectInFrame",
-                                x=receptacle_pose["x"],
-                                y=receptacle_pose["y"],
-                                checkVisible=False,
-                            )
-                            receptacle_frame_objects = receptacle_frame_event.metadata.get("objects", [])
-                            
-                            receptacle_visible = False
-                            for rec_obj in receptacle_frame_objects:
-                                if rec_obj["objectId"] == receptacle["objectId"]:
-                                    receptacle_visible = True
-                                    break
-                            
-                            if receptacle_visible:
-                                if cfg.debug:
-                                    print(f"✓ {receptacle.get('name', 'N/A')}가 프레임에 보입니다.")
-                                
-                                # PutObject 시도 (화면 중앙에 배치)
-                                put_event = controller.step(
-                                    action="PutObject",
-                                    x=0.5,  # 화면 중앙 x (0.5 = 화면 가로 중앙)
-                                    y=0.5,  # 화면 중앙 y (0.5 = 화면 세로 중앙)
-                                    forceAction=True,
-                                    placeStationary=True,
-                                    putNearXY=True  # 지정된 좌표 근처에 배치
-                                )
-                                
-                                if cfg.debug:
-                                    if put_event.metadata["lastActionSuccess"]:
-                                        print(f"✓ {movable_obj.get('name', 'N/A')}를 {receptacle.get('name', 'N/A')} 위에 배치 성공")
-                                    else:
-                                        error_msg = put_event.metadata.get('errorMessage', '')
-                                        print(f"✗ {movable_obj.get('name', 'N/A')}를 {receptacle.get('name', 'N/A')} 위에 배치 실패")
-                                        print(f"    오류: {error_msg}")
-                            else:
-                                if cfg.debug:
-                                    print(f"⚠ {receptacle.get('name', 'N/A')}가 프레임에 보이지 않습니다.")
-                        else:
-                            if cfg.debug:
-                                print(f"⚠ {receptacle.get('name', 'N/A')}와 상호작용 가능한 포즈를 찾을 수 없습니다.")
-                    else:
-                        if cfg.debug:
-                            error_msg = pickup_event.metadata.get('errorMessage', '')
-                            print(f"✗ Pickup 실패: {movable_obj.get('name', 'N/A')}")
-                            print(f"    오류: {error_msg}")
-                else:
-                    if cfg.debug:
-                        print(f"⚠ {movable_obj.get('name', 'N/A')}와 상호작용 가능한 포즈를 찾을 수 없습니다.")
-                    continue
-                    
+    # pickup 가능한 object들을 receptacle에 배치
+    place_objects_on_receptacles(controller, movable_objects, receptacles)                    
 
     top_down_frame = get_top_down_frame(controller, cfg.dataset.scene_id, vis=True)
     
